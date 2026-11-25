@@ -1,0 +1,27 @@
+name: Fork Apple checks for BIGINT SUM
+on:
+  push:
+    branches: ['v2.0-fork-ci-9ee5fec']
+
+permissions:
+  contents: read
+
+jobs:
+  osx:
+    uses: ./.github/workflows/OSX.yml
+    with:
+      duckdb_commit: '9ee5fecf603acc66f3b0391c250b85c778f2fe4d'
+      duckdb_version: 'v2.1.0-dev95694'
+      runner_macos_arm64: macos-15
+      is_release_build: false
+      skip_tests: false
+      run_all: true
+
+  swift:
+    uses: ./.github/workflows/Swift.yml
+    with:
+      duckdb_commit: '9ee5fecf603acc66f3b0391c250b85c778f2fe4d'
+      duckdb_version: 'v2.1.0-dev95694'
+      runner_macos_arm64: macos-15
+      runner_provider: github
+      is_release_build: false
