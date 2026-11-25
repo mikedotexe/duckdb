@@ -1,0 +1,43 @@
+name: Fork Linux release tests with one worker
+on:
+  push:
+    branches: ['v2.0-fork-ci-linux-9ee5fec']
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  release-tests:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/duckdb/duckdb-ci/manylinux_2_28_amd64_main:20260923-ade72a46
+    env:
+      DUCKDB_COMMIT: '9ee5fecf603acc66f3b0391c250b85c778f2fe4d'
+      DUCKDB_VERSION: 'v2.1.0-dev95694'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.DUCKDB_COMMIT }}
+      - uses: actions/download-artifact@v8
+        with:
+          run-id: 45688787925
+          github-token: ${{ github.token }}
+          name: linux-release-build.tar.gz
+          path: build
+      - name: Extract and identify the original release build
+        run: |
+          tar -xzf build/linux-release-build.tar.gz -C build
+          build/release/duckdb -c 'PRAGMA version;'
+          free -h
+      - name: Run giant-string compression test in isolation
+        run: build/release/test/unittest --thread-stack-size 131072 test/sql/storage/compression/zstd/zstd_giant_string.test_slow
+      - name: Run all release unit tests
+        run: ./build/release/test/run --workers=1 '*' --test-flags='--thread-stack-size 131072'
+      - name: Tools tests
+        run: python -m pytest tools/shell/tests --shell-binary build/release/duckdb
+      - name: Examples
+        shell: bash
+        run: |
+          build/release/benchmark/benchmark_runner benchmark/micro/update/update_with_join.benchmark
+          build/release/duckdb -c "COPY (SELECT 42) TO '/dev/stdout' (FORMAT PARQUET)" | cat
