@@ -7,6 +7,7 @@
 #include "duckdb/common/types/decimal_helper.hpp"
 #include "duckdb/common/types/hugeint.hpp"
 #include "duckdb/common/types/decimal.hpp"
+#include "duckdb/common/vector/sequence_vector.hpp"
 #include "duckdb/function/aggregate/distributive_function_utils.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/common/serializer/deserializer.hpp"
@@ -317,6 +318,28 @@ struct SumToHugeintOperation
 	}
 };
 
+static void SumSequenceUpdate(Vector inputs[], AggregateInputData &aggr_input_data, idx_t input_count,
+                              const ClusteredAggr &clustered, idx_t count) {
+	if (inputs[0].GetVectorType() == VectorType::SEQUENCE_VECTOR && count > 0 && count <= STANDARD_VECTOR_SIZE &&
+	    AggregateExecutor::IsDenseSingleRun(clustered, count)) {
+		int64_t start, increment, last;
+		SequenceVector::GetSequence(inputs[0], start, increment);
+		const auto n = static_cast<int64_t>(count);
+		const auto end = hugeint_t(start) + hugeint_t(increment) * (n - 1);
+		// With one sign throughout the chunk, cancellation cannot hide an intermediate overflow.
+		if (Hugeint::TryCast(end, last) && ((start >= 0 && last >= 0) || (start <= 0 && last <= 0))) {
+			auto &state = *reinterpret_cast<SumState<hugeint_t> *>(clustered.runs()[0].state);
+			// n * (first + last) is even, so the arithmetic right shift is exact for either sign.
+			const auto twice_sum = (hugeint_t(start) + end) * n;
+			state.value = Hugeint::Add(state.value, twice_sum >> 1);
+			state.is_set = true;
+			return;
+		}
+	}
+	AggregateFunction::UnaryClusterUpdate<SumState<hugeint_t>, int64_t, SumToHugeintOperation>(
+	    inputs, aggr_input_data, input_count, clustered, count);
+}
+
 struct NumericSumOperation
     : public ClusteredSumOperation<BaseSumOperation<SumSetOperation, RegularAdd>, ClusteredAddOp<RegularAdd>> {
 	template <class STATE, class OP>
@@ -549,6 +572,7 @@ AggregateFunction GetSumAggregate(PhysicalType type) {
 		auto function =
 		    AggregateFunction::UnaryAggregate<SumState<hugeint_t>, int64_t, hugeint_t, SumToHugeintOperation>(
 		        LogicalType::BIGINT, LogicalType::HUGEINT);
+		function.SetStateClusterUpdateCallback(SumSequenceUpdate);
 		function.GetSignature().GetParameter(0).SetName("arg");
 		function.SetStatisticsCallback(SumPropagateStats);
 		function.SetOrderDependent(AggregateOrderDependent::NOT_ORDER_DEPENDENT);

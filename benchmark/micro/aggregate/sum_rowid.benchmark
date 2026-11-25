@@ -1,0 +1,15 @@
+# name: benchmark/micro/aggregate/sum_rowid.benchmark
+# group: [aggregate]
+
+name Sum row IDs in a stored table
+group micro
+subgroup aggregate
+
+load
+CREATE TABLE integers AS SELECT i FROM range(1000000) t(i);
+
+run
+SELECT sum(rowid) FROM integers;
+
+result I
+499999500000

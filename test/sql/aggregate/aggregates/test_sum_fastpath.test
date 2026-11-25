@@ -24,3 +24,34 @@ query I
 SELECT sum(i) FROM range(9007199254736896, 9007199254740992) t(i);
 ----
 36893488147410712576
+
+# A descending sequence with an odd final chunk and a non-unit step.
+query I
+SELECT sum(i) FROM range(-7, -12304, -3) t(i);
+----
+-25225246
+
+# Widen the endpoints before adding them.
+query I
+SELECT sum(i) FROM range(9223372036854775804, 9223372036854775807) t(i);
+----
+27670116110564327415
+
+# A nonempty sequence whose contribution is zero sets the aggregate state.
+query I
+SELECT sum(i) FROM range(1) t(i);
+----
+0
+
+# A sequence crossing zero can cancel.
+query I
+SELECT sum(i) FROM range(-1023, 1024) t(i);
+----
+0
+
+# Each group sums only its selected positions.
+query II
+SELECT i % 2, sum(i) FROM range(4097) t(i) GROUP BY 1 ORDER BY 1;
+----
+0	4196352
+1	4194304
