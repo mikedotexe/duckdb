@@ -1,0 +1,99 @@
+# name: test/sql/storage/compression/rle/rle_stddev.test
+# description: Variance consumes persistent RLE DOUBLE vectors without changing results
+# group: [rle]
+
+require vector_size 2048
+
+# The representation is intentionally checked below.
+require no_vector_verification
+
+load {TEST_DIR}/rle_stddev.db
+
+statement ok
+SET threads=1
+
+statement ok
+SET force_compression='rle'
+
+statement ok
+CREATE TABLE readings(x DOUBLE);
+
+statement ok
+INSERT INTO readings SELECT 20 FROM range(4096);
+
+statement ok
+INSERT INTO readings SELECT 23 FROM range(2048);
+
+statement ok
+INSERT INTO readings SELECT 19 FROM range(2048);
+
+statement ok
+CHECKPOINT
+
+query I
+SELECT count(*) > 0 FROM pragma_storage_info('readings') WHERE segment_type='DOUBLE' AND compression='RLE';
+----
+true
+
+# All four full vectors fit within runs; forced row fetches deliberately flatten them.
+query I
+SELECT DISTINCT vector_type(x) = CASE WHEN current_setting('debug_force_fetch_row')
+                                    THEN 'FLAT_VECTOR' ELSE 'CONSTANT_VECTOR' END
+FROM readings;
+----
+true
+
+query IRRR
+SELECT count(*), var_pop(x), stddev_pop(x), round(var_samp(x), 8) FROM readings;
+----
+8192	2.25	1.5	2.25027469
+
+query I
+SELECT abs(sem(x) - 1.5 / sqrt(8192)) < 1e-12 FROM readings;
+----
+true
+
+# Reopened storage must expose the same values and moments.
+restart
+
+query IRR
+SELECT count(*), var_pop(x), stddev_pop(x) FROM readings;
+----
+8192	2.25	1.5
+
+# A predicate can select only a subset of complete runs.
+query IRR
+SELECT count(*), var_pop(x), stddev_pop(x) FROM readings WHERE x <> 20;
+----
+4096	4	2
+
+# Rounding in a constant batch must not turn scalar overflow into a finite result.
+statement ok
+SET threads=1
+
+statement ok
+SET force_compression='rle'
+
+statement ok
+CREATE TABLE overflow_readings AS
+SELECT CASE WHEN i = 2046 THEN 9.4807519081083021e153::DOUBLE
+            WHEN i = 2047 THEN -9.4807519081083021e153::DOUBLE
+            WHEN i >= 2048 THEN 1.7811921424414993e146::DOUBLE
+            ELSE 0::DOUBLE END AS x
+FROM range(4096) t(i);
+
+statement ok
+CHECKPOINT
+
+query I
+SELECT bool_and(vector_type(x) = CASE WHEN current_setting('debug_force_fetch_row') THEN 'FLAT_VECTOR'
+                                     WHEN rowid < 2048 THEN 'DICTIONARY_VECTOR'
+                                     ELSE 'CONSTANT_VECTOR' END)
+FROM overflow_readings;
+----
+true
+
+query III
+SELECT isinf(var_pop(x)), isinf(var_samp(x)), isinf(stddev_pop(x)) FROM overflow_readings;
+----
+true	true	true

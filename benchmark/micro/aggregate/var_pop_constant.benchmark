@@ -1,0 +1,20 @@
+# name: benchmark/micro/aggregate/var_pop_constant.benchmark
+# description: Variance over repeated DOUBLE readings in persistent storage
+# group: [aggregate]
+
+name Variance over constant vectors
+group micro
+subgroup aggregate
+storage persistent
+
+load
+CREATE TABLE readings AS
+SELECT CASE WHEN i < 5120000 THEN 20::DOUBLE WHEN i < 8192000 THEN 23::DOUBLE ELSE 19::DOUBLE END AS x
+FROM range(10240000) t(i);
+CHECKPOINT;
+
+run
+SELECT var_pop(x) FROM readings;
+
+result I
+2.41

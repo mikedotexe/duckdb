@@ -1,0 +1,165 @@
+# name: test/sql/aggregate/aggregates/test_stddev_constant.test
+# description: Constant-input variance and standard deviation, with clustered and fallback paths
+# group: [aggregates]
+
+statement ok
+SET threads=1
+
+# Empty and all-NULL inputs retain the existing NULL contract.
+query RRRRR
+SELECT var_pop(x), var_samp(x), stddev_pop(x), stddev_samp(x), sem(x)
+FROM (SELECT 42::DOUBLE AS x FROM range(0)) t;
+----
+NULL	NULL	NULL	NULL	NULL
+
+query RRRRR
+SELECT var_pop(NULL::DOUBLE), var_samp(NULL::DOUBLE), stddev_pop(NULL::DOUBLE), stddev_samp(NULL::DOUBLE), sem(NULL::DOUBLE)
+FROM range(4097);
+----
+NULL	NULL	NULL	NULL	NULL
+
+query RRRRR
+SELECT var_pop(x), var_samp(x), stddev_pop(x), stddev_samp(x), sem(x)
+FROM (SELECT 3.7::DOUBLE AS x) t;
+----
+0	NULL	0	NULL	0
+
+# A full pair of chunks plus a singleton tail.
+query RRRRR
+SELECT var_pop(3.7::DOUBLE), var_samp(3.7::DOUBLE), stddev_pop(3.7::DOUBLE), stddev_samp(3.7::DOUBLE), sem(3.7::DOUBLE)
+FROM range(4097);
+----
+0	0	0	0	0
+
+query RR
+SELECT var_pop('-0.0'::DOUBLE), var_samp('-0.0'::DOUBLE) FROM range(4097);
+----
+0	0
+
+# State export makes the initialization's sign of zero observable.
+query IIIII
+WITH state AS (
+    SELECT (var_pop('-0.0'::DOUBLE) EXPORT_STATE)::STRUCT(count UBIGINT, mean DOUBLE, dsquared DOUBLE) AS s
+    FROM range(4097)
+)
+SELECT s.count, (s.mean = 0)::INTEGER, signbit(s.mean)::INTEGER,
+       (s.dsquared = 0)::INTEGER, signbit(s.dsquared)::INTEGER FROM state;
+----
+4097	1	0	1	0
+
+# The state already contains observations of other values when later batches arrive.
+query IIIII
+WITH readings AS (
+    SELECT 20::DOUBLE AS x FROM range(10000)
+    UNION ALL SELECT 23::DOUBLE FROM range(6000)
+    UNION ALL SELECT 19::DOUBLE FROM range(4000)
+)
+SELECT (abs(var_pop(x) - 2.41) < 1e-10)::INTEGER,
+       (abs(var_samp(x) - 48200.0 / 19999) < 1e-10)::INTEGER,
+       (abs(stddev_pop(x) - sqrt(2.41)) < 1e-10)::INTEGER,
+       (abs(stddev_samp(x) - sqrt(48200.0 / 19999)) < 1e-10)::INTEGER,
+       (abs(sem(x) - sqrt(2.41 / 20000)) < 1e-10)::INTEGER
+FROM readings;
+----
+1	1	1	1	1
+
+# Noncontiguous group selections have unequal counts in each constant run.
+# var_pop + var_samp makes both operations eligible for the clustered executor.
+query IIII rowsort
+WITH readings AS (
+    SELECT i % 3 AS g, 20::DOUBLE AS x FROM range(10001) t(i)
+    UNION ALL SELECT i % 3, 23::DOUBLE FROM range(6002) t(i)
+    UNION ALL SELECT i % 3, 19::DOUBLE FROM range(4003) t(i)
+), measured AS (
+    SELECT g, count(*) AS n, var_pop(x) AS vp, var_samp(x) AS vs FROM readings GROUP BY g
+), expected(g, n, vp, vs) AS (
+    VALUES (0, 6670, 2.410359797612438, 2.410721225082466),
+           (1, 6669, 2.410287888217981, 2.410649359107036),
+           (2, 6667, 2.410143974577182, 2.410505532329144)
+)
+SELECT m.g, (m.n = e.n)::INTEGER, (abs(m.vp - e.vp) < 1e-10)::INTEGER,
+       (abs(m.vs - e.vs) < 1e-10)::INTEGER
+FROM measured m JOIN expected e ON m.g = e.g;
+----
+0	1	1	1
+1	1	1	1
+2	1	1	1
+
+# DISTINCT represents three values, not their original multiplicities.
+query II
+WITH readings AS (
+    SELECT 20::DOUBLE AS x FROM range(10000)
+    UNION ALL SELECT 23::DOUBLE FROM range(6000)
+    UNION ALL SELECT 19::DOUBLE FROM range(4000)
+)
+SELECT (abs(var_pop(DISTINCT x) - 26.0 / 9) < 1e-10)::INTEGER,
+       (abs(var_samp(DISTINCT x) - 13.0 / 3) < 1e-10)::INTEGER
+FROM readings;
+----
+1	1
+
+query RRR
+SELECT var_pop(42::DOUBLE) FILTER (WHERE i % 3 = 0),
+       var_samp(42::DOUBLE) FILTER (WHERE i = 0),
+       var_pop(42::DOUBLE) FILTER (WHERE false)
+FROM range(4097) t(i);
+----
+0	NULL	NULL
+
+# Finite extreme constants still have exactly zero variance.
+query RR
+SELECT var_pop(1e308::DOUBLE), var_samp(1e308::DOUBLE) FROM range(4097);
+----
+0	0
+
+# Do not turn repeated infinities or NaNs into a finite zero-variance batch.
+query IIII
+SELECT isnan(var_pop('inf'::DOUBLE))::INTEGER,
+       isnan(var_samp('inf'::DOUBLE))::INTEGER,
+       isnan(stddev_pop('nan'::DOUBLE))::INTEGER,
+       isnan(sem('-inf'::DOUBLE))::INTEGER
+FROM range(4097);
+----
+1	1	1	1
+
+# The existing population finalizers explicitly return zero for a singleton.
+query RRRR
+SELECT var_pop('inf'::DOUBLE), stddev_pop('inf'::DOUBLE),
+       var_samp('inf'::DOUBLE), stddev_samp('inf'::DOUBLE)
+FROM range(1);
+----
+0	0	NULL	NULL
+
+query III
+SELECT isinf(var_pop(x))::INTEGER, isinf(var_samp(x))::INTEGER, isinf(stddev_pop(x))::INTEGER
+FROM (VALUES (1e301::DOUBLE), (-1e301::DOUBLE)) t(x);
+----
+1	1	1
+
+# Whole-partition windows use the new cluster callback with selected counts.
+query IR rowsort
+WITH measured AS (
+    SELECT i % 3 AS g,
+           var_pop(42::DOUBLE) FILTER (WHERE i % 3 = 0) OVER (PARTITION BY i % 3) AS v
+    FROM range(4097) t(i)
+)
+SELECT g, max(v) FROM measured GROUP BY g;
+----
+0	0
+1	NULL
+2	NULL
+
+# Moving windows continue to use the existing scatter/combine machinery.
+query IR
+SELECT i, round(var_pop(i::DOUBLE) OVER (ORDER BY i ROWS BETWEEN 2 PRECEDING AND CURRENT ROW), 6)
+FROM range(1, 7) t(i) ORDER BY i;
+----
+1	0
+2	0.25
+3	0.666667
+4	0.666667
+5	0.666667
+6	0.666667
+
+statement ok
+RESET threads

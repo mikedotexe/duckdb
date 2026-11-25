@@ -9,9 +9,11 @@
 #pragma once
 
 #include "duckdb/common/operator/add.hpp"
+#include "duckdb/function/aggregate/distributive_function_utils.hpp"
 #include "duckdb/function/aggregate_function.hpp"
 #include <complex>
 #include <cmath>
+#include <limits>
 
 namespace duckdb {
 
@@ -26,7 +28,7 @@ struct StddevState {
 
 // Streaming approximate standard deviation using Welford's
 // method, DOI: 10.2307/1266577
-struct STDDevBaseOperation {
+struct STDDevBaseOperation : public ClusteredStateCopy {
 	template <class INPUT_TYPE, class STATE>
 	static void Execute(STATE &state, const INPUT_TYPE &input) {
 		// update running mean and d^2
@@ -45,12 +47,65 @@ struct STDDevBaseOperation {
 		Execute(state, input);
 	}
 
-	template <class INPUT_TYPE, class STATE, class OP>
-	static void ConstantOperation(STATE &state, const INPUT_TYPE &input, AggregateUnaryInput &unary_input,
-	                              idx_t count) {
-		for (idx_t i = 0; i < count; i++) {
-			Operation<INPUT_TYPE, STATE, OP>(state, input, unary_input);
+	template <class INPUT_TYPE, class STATE>
+	static bool TryConstantUpdate(STATE &state, const INPUT_TYPE &input, idx_t count) {
+		if (count <= 1 || count > STANDARD_VECTOR_SIZE || !std::isfinite(input) || !std::isfinite(state.mean) ||
+		    !std::isfinite(state.dsquared)) {
+			return false;
 		}
+		uint64_t total_count;
+		if (!TryAddOperator::Operation(state.count, static_cast<uint64_t>(count), total_count)) {
+			return false;
+		}
+		auto candidate = state;
+		if (state.count == 0) {
+			// Preserve the first updates' signed-zero behavior.
+			Execute(candidate, input);
+			if (candidate.mean != input || candidate.dsquared != 0) {
+				return false;
+			}
+			Execute(candidate, input);
+		} else {
+			const auto delta = input - state.mean;
+			const auto delta_squared = delta * delta;
+			// Keep the scalar recurrence away from overflow despite different rounding.
+			constexpr auto headroom = std::numeric_limits<double>::max() / 4;
+			if (state.dsquared < 0 || state.dsquared > headroom || !std::isfinite(delta_squared) ||
+			    delta_squared > headroom / static_cast<double>(count)) {
+				return false;
+			}
+			const auto source_count = static_cast<double>(count);
+			const auto target_count = static_cast<double>(state.count);
+			const auto combined_count = static_cast<double>(total_count);
+			candidate.mean = std::fma(source_count / combined_count, delta, state.mean);
+			candidate.dsquared = state.dsquared + delta_squared * source_count * target_count / combined_count;
+			if (!std::isfinite(candidate.mean) || !std::isfinite(candidate.dsquared)) {
+				return false;
+			}
+		}
+		candidate.count = total_count;
+		state = candidate;
+		return true;
+	}
+
+	template <class INPUT_TYPE, class STATE>
+	static void UpdateClusteredLocal(STATE &local, const INPUT_TYPE &input) {
+		Execute(local, input);
+	}
+
+	template <class INPUT_TYPE, class STATE>
+	static void UpdateClusteredLocal(STATE &local, const INPUT_TYPE &input, idx_t count) {
+		if (TryConstantUpdate(local, input, count)) {
+			return;
+		}
+		for (idx_t i = 0; i < count; i++) {
+			Execute(local, input);
+		}
+	}
+
+	template <class INPUT_TYPE, class STATE, class OP>
+	static void ConstantOperation(STATE &state, const INPUT_TYPE &input, AggregateUnaryInput &, idx_t count) {
+		UpdateClusteredLocal(state, input, count);
 	}
 
 	template <class STATE, class OP>
