@@ -1,0 +1,45 @@
+name: Fork ThreadSanitizer tests
+on:
+  push:
+    branches: ['v2.0-fork-ci-tsan-9ee5fec']
+
+permissions:
+  contents: read
+
+jobs:
+  threadsan:
+    runs-on: ubuntu-22.04
+    container:
+      image: ghcr.io/duckdb/duckdb-ci/manylinux_2_28_amd64_main:20260923-ade72a46
+    env:
+      DUCKDB_COMMIT: '9ee5fecf603acc66f3b0391c250b85c778f2fe4d'
+      DUCKDB_VERSION: 'v2.1.0-dev95694'
+      TSAN_OPTIONS: suppressions=.sanitizer-thread-suppressions.txt:external_symbolizer_path=/usr/bin/llvm-symbolizer
+      DUCKDB_TEST_DESCRIPTION: 'Tests run with thread sanitizer.'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.DUCKDB_COMMIT }}
+      - name: Check sanitizer startup before building
+        shell: bash
+        run: |
+          cat /proc/sys/vm/mmap_rnd_bits
+          printf 'int main(void) { return 0; }\n' | clang -x c - -fsanitize=thread -o "$RUNNER_TEMP/tsan-startup"
+          for attempt in {1..100}; do "$RUNNER_TEMP/tsan-startup"; done
+      - uses: ./.github/actions/ccache-action
+        with:
+          save: true
+      - name: Build ThreadSanitizer configuration
+        uses: duckdb/duckdb-ci/build-duckdb@main
+        env:
+          BUILD_JEMALLOC: 1
+          THREADSAN: 1
+          CORE_EXTENSIONS: 'icu;tpch;tpcds;fts;json;inet;parquet;autocomplete;httpfs'
+        with:
+          build-type: reldebug
+          build: python3 scripts/ci/retry.py -- make reldebug
+          vcpkg-commit: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3
+          cache-suffix: threadsan
+          save-cache: true
+      - name: Run ThreadSanitizer suite
+        run: make unittest_threadsan
