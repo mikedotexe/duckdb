@@ -103,7 +103,8 @@ jobs:
           if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.duckdb_commit }}" ]]; then
             resolved_commit="$(gh api -X GET "/repos/${{ github.repository }}/commits" -f sha="${{ inputs.duckdb_commit }}" -f per_page=1 --jq '.[0].sha')"
           else
-            resolved_commit="${{ github.sha }}"
+            # This fork-only ref holds the runner configuration. Build the exact PR source.
+            resolved_commit="9ee5fecf603acc66f3b0391c250b85c778f2fe4d"
           fi
           echo "duckdb_commit=$resolved_commit" >> "$GITHUB_OUTPUT"
           echo "Using duckdb_commit=$resolved_commit"
@@ -152,6 +153,8 @@ jobs:
         id: changed
         uses: tj-actions/changed-files@v47
         with:
+          base_sha: 'f09095cd82590feef40372973f67f22c74a964ef'
+          sha: ${{ steps.resolve_duckdb_commit.outputs.duckdb_commit }}
           separator: "\n"
           safe_output: false
           write_output_files: true
@@ -908,7 +911,7 @@ jobs:
         tar -xzf build/linux-release-build.tar.gz -C build
 
     - name: Run all release unit tests
-      run: make allunit T="--test-flags='--thread-stack-size 131072'"
+      run: ./build/release/test/run --workers=1 '*' --test-flags='--thread-stack-size 131072'
 
     - name: Tools Tests
       run: python -m pytest tools/shell/tests --shell-binary build/release/duckdb
@@ -1080,7 +1083,7 @@ jobs:
       duckdb_commit: ${{ needs.prepare.outputs.duckdb_commit }}
       duckdb_version: ${{ needs.prepare.outputs.duckdb_version }}
       is_release_build: ${{ fromJson(needs.prepare.outputs.is_release_build) }}
-      runner_macos_arm64: ${{ needs.prepare.outputs.runner_macos_14_arm64 }}
+      runner_macos_arm64: macos-15
       runner_provider: ${{ needs.prepare.outputs.runner_provider }}
 
  windows:
@@ -1251,7 +1254,7 @@ jobs:
     needs:
       - prepare
       - linux-relassert
-    runs-on: ${{ needs.prepare.outputs.runner_linux_x64 }}
+    runs-on: ubuntu-22.04
     container:
       image: ${{ fromJson(needs.prepare.outputs.images).manylinux_amd64_main }}
     env:
