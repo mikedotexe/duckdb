@@ -1,0 +1,52 @@
+name: Fork Linux release tests with extra swap
+on:
+  push:
+    branches: ['v2.0-fork-ci-memory-9ee5fec']
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  release-tests:
+    runs-on: ubuntu-latest
+    env:
+      DUCKDB_COMMIT: '9ee5fecf603acc66f3b0391c250b85c778f2fe4d'
+      DUCKDB_VERSION: 'v2.1.0-dev95694'
+      MANYLINUX_IMAGE: ghcr.io/duckdb/duckdb-ci/manylinux_2_28_amd64_main:20260923-ade72a46
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.DUCKDB_COMMIT }}
+      - uses: actions/download-artifact@v8
+        with:
+          run-id: 45747060902
+          github-token: ${{ github.token }}
+          name: linux-release-build.tar.gz
+          path: build
+      - name: Provision swap on this hosted VM
+        run: |
+          free -h
+          df -h /mnt
+          swapfile=$(sudo mktemp /mnt/duckdb-ci-swap.XXXXXXXX)
+          sudo fallocate -l 8G "$swapfile"
+          sudo mkswap "$swapfile"
+          sudo swapon "$swapfile"
+          free -h
+      - name: Run release checks on the combined workflow's binary
+        run: |
+          test "$(git rev-parse HEAD)" = "$DUCKDB_COMMIT"
+          docker run --rm -i -v "$GITHUB_WORKSPACE:/source" -w /source \
+            -e CI=true -e GITHUB_ACTIONS=true -e DUCKDB_COMMIT -e DUCKDB_VERSION \
+            "$MANYLINUX_IMAGE" bash -euo pipefail <<'IN_CONTAINER'
+          git config --global --add safe.directory /source
+          tar -xzf build/linux-release-build.tar.gz -C build
+          build/release/duckdb -c 'PRAGMA version;'
+          free -h
+          build/release/test/unittest --thread-stack-size 131072 test/sql/storage/compression/zstd/zstd_giant_string.test_slow | tee /tmp/zstd-result
+          grep -F '6 assertions in 1 test case' /tmp/zstd-result
+          ./build/release/test/run --workers=1 '*' --test-flags='--thread-stack-size 131072'
+          python -m pytest tools/shell/tests --shell-binary build/release/duckdb
+          build/release/benchmark/benchmark_runner benchmark/micro/update/update_with_join.benchmark
+          build/release/duckdb -c "COPY (SELECT 42) TO '/dev/stdout' (FORMAT PARQUET)" > /tmp/example.parquet
+          IN_CONTAINER
