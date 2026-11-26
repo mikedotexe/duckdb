@@ -884,12 +884,11 @@ jobs:
     needs:
       - prepare
       - linux-release
-    container:
-      image: ${{ fromJson(needs.prepare.outputs.images).manylinux_amd64_main }}
     runs-on: ${{ needs.prepare.outputs.runner_linux_x64 }}
     env:
       DUCKDB_VERSION: ${{ needs.prepare.outputs.duckdb_version }}
       DUCKDB_COMMIT: ${{ needs.prepare.outputs.duckdb_commit }}
+      MANYLINUX_IMAGE: ${{ fromJson(needs.prepare.outputs.images).manylinux_amd64_main }}
 
     steps:
     - name: "Checkout"
@@ -905,21 +904,35 @@ jobs:
         name: linux-release-build.tar.gz
         path: build
 
+    - name: Add swap before starting the manylinux test container
+      run: |
+        free -h
+        swapfile=$(sudo mktemp /mnt/duckdb-ci-swap.XXXXXXXX)
+        sudo fallocate -l 8G "$swapfile"
+        sudo mkswap "$swapfile"
+        sudo swapon "$swapfile"
+        free -h
+        build_root=/__w/duckdb/duckdb
+        docker run --detach --name release-tests -v "$GITHUB_WORKSPACE:$build_root" -w "$build_root" \
+          -e CI=true -e GITHUB_ACTIONS=true -e DUCKDB_VERSION -e DUCKDB_COMMIT \
+          --entrypoint sleep "$MANYLINUX_IMAGE" infinity
+        docker exec release-tests git config --global --add safe.directory "$build_root"
+
     - name: Extract linux release artifact
       run: |
         rm -rf build/release
         tar -xzf build/linux-release-build.tar.gz -C build
 
     - name: Run all release unit tests
-      run: ./build/release/test/run --workers=1 '*' --test-flags='--thread-stack-size 131072'
+      run: docker exec release-tests ./build/release/test/run --workers=1 '*' --test-flags='--thread-stack-size 131072'
 
     - name: Tools Tests
-      run: python -m pytest tools/shell/tests --shell-binary build/release/duckdb
+      run: docker exec release-tests python -m pytest tools/shell/tests --shell-binary build/release/duckdb
 
     - name: Examples
       run: |
-        build/release/benchmark/benchmark_runner benchmark/micro/update/update_with_join.benchmark
-        build/release/duckdb -c "COPY (SELECT 42) TO '/dev/stdout' (FORMAT PARQUET)" | cat
+        docker exec release-tests build/release/benchmark/benchmark_runner benchmark/micro/update/update_with_join.benchmark
+        docker exec release-tests build/release/duckdb -c "COPY (SELECT 42) TO '/dev/stdout' (FORMAT PARQUET)" > "$RUNNER_TEMP/example.parquet"
 
  linux-release-musl:
     name: Linux Release (musl, ${{ matrix.config.name }})
