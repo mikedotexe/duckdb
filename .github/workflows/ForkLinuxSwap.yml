@@ -36,10 +36,11 @@ jobs:
       - name: Run release checks on the combined workflow's binary
         run: |
           test "$(git rev-parse HEAD)" = "$DUCKDB_COMMIT"
-          docker run --rm -i -v "$GITHUB_WORKSPACE:/source" -w /source \
+          build_root=/__w/duckdb/duckdb
+          docker run --rm -i -v "$GITHUB_WORKSPACE:$build_root" -w "$build_root" \
             -e CI=true -e GITHUB_ACTIONS=true -e DUCKDB_COMMIT -e DUCKDB_VERSION \
             "$MANYLINUX_IMAGE" bash -euo pipefail <<'IN_CONTAINER'
-          git config --global --add safe.directory /source
+          git config --global --add safe.directory "$PWD"
           tar -xzf build/linux-release-build.tar.gz -C build
           build/release/duckdb -c 'PRAGMA version;'
           free -h
